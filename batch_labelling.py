@@ -47,6 +47,6 @@ if __name__ == '__main__' :
     parser.add_argument('--model', type=str, default = "/home/ubuntu/data/models/llava-v1.5-7b")
     parser.add_argument('--prompt', type=str, default = "describe this image and its style in a very detailed manner.")
     parser.add_argument('--n', type=int, default = 1, help = 'How many captions to generate for an image')
-    parser.add_argument('--bs', type=int, default = 16, help = 'Inference batch size')
+    parser.add_argument('--bs', type=int, default = 256, help = 'Inference batch size')
     args = parser.parse_args()
     main(args.input, args.prompt, args.model, args.n, args.bs)
