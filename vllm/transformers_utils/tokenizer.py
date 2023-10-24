@@ -9,7 +9,7 @@ logger = init_logger(__name__)
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
-
+IMAGE_TOKEN_INDEX = -200
 
 def get_tokenizer(
     tokenizer_name: str,
@@ -111,6 +111,7 @@ def detokenize_incrementally(
     skip_special_tokens: bool = False,
 ) -> Tuple[List[str], str, int, int]:
     new_token_id = all_input_ids[-1]
+    all_input_ids = [x if x != IMAGE_TOKEN_INDEX else 1 for x in all_input_ids]
     # This is the first iteration for this sequence
     if prev_tokens is None:
         new_tokens = tokenizer.convert_ids_to_tokens(

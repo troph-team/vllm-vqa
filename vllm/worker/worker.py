@@ -103,7 +103,7 @@ class Worker:
             )
             seqs.append(seq)
 
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, image_embd, input_positions, input_metadata = self._prepare_inputs(
             seqs)
 
         # Execute the model.
@@ -157,6 +157,7 @@ class Worker:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
+        #breakpoint()
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
@@ -164,6 +165,7 @@ class Worker:
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
+        image_datas: List[torch.Tensor] = []
         for seq_group_metadata in seq_group_metadata_list:
             if not seq_group_metadata.is_prompt:
                 continue
@@ -184,6 +186,7 @@ class Worker:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.append(list(range(prompt_len)))
+            image_datas.append(seq_data.get_image_embd())
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -214,7 +217,7 @@ class Worker:
             seq_groups.append((seq_ids, sampling_params))
 
             for seq_id in seq_ids:
-                seq_data = seq_group_metadata.seq_data[seq_id]
+                seq_data: SequenceData = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append([generation_token])
 
@@ -290,7 +293,7 @@ class Worker:
             block_tables=block_tables_tensor,
             sliding_window=self.sliding_window,
         )
-        return tokens_tensor, positions_tensor, input_metadata
+        return tokens_tensor, image_datas, positions_tensor, input_metadata
 
     @torch.inference_mode()
     def execute_model(
@@ -325,12 +328,13 @@ class Worker:
             return {}
 
         # Prepare input tensors.
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, image_datas, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
 
         # Execute the model.
         output = self.model(
             input_ids=input_tokens,
+            image_embd = image_datas,
             positions=input_positions,
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
