@@ -1,15 +1,16 @@
 from typing import List, Optional, Tuple, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
+                          PreTrainedTokenizerFast, LlamaTokenizer)
 
 from vllm.logger import init_logger
+IMAGE_TOKEN_INDEX = -200
 
 logger = init_logger(__name__)
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
-IMAGE_TOKEN_INDEX = -200
+
 
 def get_tokenizer(
     tokenizer_name: str,

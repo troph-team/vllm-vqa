@@ -2,6 +2,8 @@
 import copy
 import enum
 from typing import Dict, List, Optional, Union
+import torch
+from PIL import Image
 
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
@@ -63,14 +65,19 @@ class SequenceData:
     def __init__(
         self,
         prompt_token_ids: List[int],
+        image: Optional[Image.Image] = None
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
+        self.image = image
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
+
+    def get_image_pil(self) :
+        return self.image
 
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
@@ -113,12 +120,13 @@ class Sequence:
         prompt: str,
         prompt_token_ids: List[int],
         block_size: int,
+        image: Optional[Image.Image] = None
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
         self.block_size = block_size
 
-        self.data = SequenceData(prompt_token_ids)
+        self.data = SequenceData(prompt_token_ids, image)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 

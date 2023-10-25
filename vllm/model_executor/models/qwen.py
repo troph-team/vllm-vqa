@@ -38,6 +38,86 @@ from vllm.transformers_utils.configs.qwen import QWenConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+from .qwen_visual import VisionTransformer
+from PIL import Image
+
+from transformers import PreTrainedTokenizer
+
+def make_context(
+    tokenizer: PreTrainedTokenizer,
+    query: str,
+    history: List[Tuple[str, str]] = None,
+    system: str = "",
+    max_window_size: int = 6144,
+    chat_format: str = "chatml",
+):
+    if history is None:
+        history = []
+
+    if chat_format == "chatml":
+        im_start, im_end = "<|im_start|>", "<|im_end|>"
+        im_start_tokens = [tokenizer.im_start_id]
+        im_end_tokens = [tokenizer.im_end_id]
+        nl_tokens = tokenizer.encode("\n")
+
+        def _tokenize_str(role, content):
+            return f"{role}\n{content}", tokenizer.encode(
+                role, allowed_special=set(tokenizer.IMAGE_ST)
+            ) + nl_tokens + tokenizer.encode(content, allowed_special=set(tokenizer.IMAGE_ST))
+
+        system_text, system_tokens_part = _tokenize_str("system", system)
+        system_tokens = im_start_tokens + system_tokens_part + im_end_tokens
+
+        raw_text = ""
+        context_tokens = []
+
+        for turn_query, turn_response in reversed(history):
+            query_text, query_tokens_part = _tokenize_str("user", turn_query)
+            query_tokens = im_start_tokens + query_tokens_part + im_end_tokens
+            if turn_response is not None:
+                response_text, response_tokens_part = _tokenize_str(
+                    "assistant", turn_response
+                )
+                response_tokens = im_start_tokens + response_tokens_part + im_end_tokens
+
+                next_context_tokens = nl_tokens + query_tokens + nl_tokens + response_tokens
+                prev_chat = (
+                    f"\n{im_start}{query_text}{im_end}\n{im_start}{response_text}{im_end}"
+                )
+            else:
+                next_context_tokens = nl_tokens + query_tokens + nl_tokens
+                prev_chat = f"\n{im_start}{query_text}{im_end}\n"
+
+            current_context_size = (
+                len(system_tokens) + len(next_context_tokens) + len(context_tokens)
+            )
+            if current_context_size < max_window_size:
+                context_tokens = next_context_tokens + context_tokens
+                raw_text = prev_chat + raw_text
+            else:
+                break
+
+        context_tokens = system_tokens + context_tokens
+        raw_text = f"{im_start}{system_text}{im_end}" + raw_text
+        context_tokens += (
+            nl_tokens
+            + im_start_tokens
+            + _tokenize_str("user", query)[1]
+            + im_end_tokens
+            + nl_tokens
+            + im_start_tokens
+            + tokenizer.encode("assistant")
+            + nl_tokens
+        )
+        raw_text += f"\n{im_start}user\n{query}{im_end}\n{im_start}assistant\n"
+
+    elif chat_format == "raw":
+        raw_text = query
+        context_tokens = tokenizer.encode(raw_text)
+    else:
+        raise NotImplementedError(f"Unknown chat format {chat_format!r}")
+
+    return raw_text, context_tokens
 
 class QWenMLP(nn.Module):
 
@@ -193,6 +273,13 @@ class QWenModel(nn.Module):
         self.h = nn.ModuleList(
             [QWenBlock(config) for _ in range(config.num_hidden_layers)])
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        
+        if hasattr(config, 'visual') :
+            print('using QWenLMHeadModel with vision')
+            self.visual = VisionTransformer(**config.visual)
+        else :
+            print('using QWenLMHeadModel')
+            self.visual = None
 
     def forward(
         self,
@@ -201,8 +288,17 @@ class QWenModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
+        image_pils: Optional[List[Image.Image]] = None
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
+        if image_pils and image_pils[0] is not None :
+            image_embds = self.visual.encode(image_pils)
+            bos_pos = torch.where(input_ids == self.config.visual['image_start_id'])
+            eos_pos = torch.where(input_ids == self.config.visual['image_start_id'] + 1)
+            assert (bos_pos[0] == eos_pos[0]).all()
+            img_pos = torch.stack((bos_pos[0], bos_pos[1], eos_pos[1]), dim=1)
+            for idx, (i, a, b) in enumerate(img_pos):
+                hidden_states[i, a + 1 : b] = image_embds[idx]
         for i in range(len(self.h)):
             if cache_events is None:
                 cache_event = None
@@ -242,9 +338,10 @@ class QWenLMHeadModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
+        image_pils: Optional[List[Image.Image]] = None
     ) -> SamplerOutput:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
+                                         input_metadata, cache_events, image_pils = image_pils)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
         return next_tokens

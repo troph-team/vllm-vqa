@@ -4,7 +4,7 @@ from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.mllm_engine import MLLMEngine, process_images
+from vllm.engine.mllm_engine import MLLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
@@ -150,18 +150,13 @@ class MLLM:
             num_requests = len(prompts)
         else:
             num_requests = len(prompt_token_ids)
-        padded_images = process_images(images, self.llm_engine.vision_tower.image_processor)
-        # TODO: run vision tower
-
-        #features = [None] * padded_images.size(0) # N, L, 4096
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             if prompt_token_ids is None:
                 token_ids = None
             else:
                 token_ids = prompt_token_ids[i]
-            self._add_request(prompt, sampling_params, token_ids, padded_images[i])
-        #breakpoint()
+            self._add_request(prompt, sampling_params, token_ids, images[i])
         return self._run_engine(use_tqdm)
 
     def _add_request(
@@ -169,11 +164,11 @@ class MLLM:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]],
-        image_embed: Optional[torch.Tensor] = None
+        image: Optional[Image.Image] = None
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id, prompt, sampling_params,
-                                    prompt_token_ids, image_embed = image_embed)
+                                    prompt_token_ids, image = image)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.

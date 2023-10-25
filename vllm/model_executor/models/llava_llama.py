@@ -47,10 +47,150 @@ from vllm.model_executor.weight_utils import (
     load_tensor_parallel_weights, load_padded_tensor_parallel_vocab)
 from vllm.sequence import SamplerOutput
 
-from vllm.engine.mllm_engine import IMAGE_TOKEN_INDEX
-
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
+from PIL import Image
+
+IMAGE_TOKEN_INDEX = -200
+
+class CLIPVisionTower(nn.Module):
+    def __init__(self, vision_tower, args, delay_load=False):
+        super().__init__()
+
+        self.is_loaded = False
+
+        self.vision_tower_name = vision_tower
+        self.select_layer = getattr(args, 'mm_vision_select_layer', -2)
+        self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
+
+        if not delay_load:
+            self.load_model()
+        else:
+            self.cfg_only = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
+
+    def load_model(self):
+        self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
+        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name)
+        self.vision_tower.requires_grad_(False)
+
+        self.is_loaded = True
+
+    def feature_select(self, image_forward_outs):
+        image_features = image_forward_outs.hidden_states[self.select_layer]
+        if self.select_feature == 'patch':
+            image_features = image_features[:, 1:]
+        elif self.select_feature == 'cls_patch':
+            image_features = image_features
+        else:
+            raise ValueError(f'Unexpected select feature: {self.select_feature}')
+        return image_features
+
+    @torch.no_grad()
+    def forward(self, images):
+        if type(images) is list:
+            image_features = []
+            for image in images:
+                image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
+                image_feature = self.feature_select(image_forward_out).to(image.dtype)
+                image_features.append(image_feature)
+        else:
+            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
+            image_features = self.feature_select(image_forward_outs).to(images.dtype)
+
+        return image_features
+
+    @property
+    def dummy_feature(self):
+        return torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)
+
+    @property
+    def dtype(self):
+        return self.vision_tower.dtype
+
+    @property
+    def device(self):
+        return self.vision_tower.device
+
+    @property
+    def config(self):
+        if self.is_loaded:
+            return self.vision_tower.config
+        else:
+            return self.cfg_only
+
+    @property
+    def hidden_size(self):
+        return self.config.hidden_size
+
+    @property
+    def num_patches(self):
+        return (self.config.image_size // self.config.patch_size) ** 2
+
+def repeat_element(lst, element, times):
+    # Create a new list to store the modified elements
+    new_lst = []
+    
+    for item in lst:
+        # Add the current item to the new list
+        new_lst.append(item)
+        
+        # Check if the current item is equal to the element to be repeated
+        if item == element:
+            # Repeat the element 'times' number of times
+            new_lst.extend([element] * (times - 1))
+    
+    return new_lst
+
+def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, image_embd_size=576, return_tensors=None):
+    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<image>')]
+    
+    def insert_separator(X, sep):
+        return [ele for sublist in zip(X, [sep]*len(X)) for ele in sublist][:-1]
+
+    input_ids = []
+    offset = 0
+    if len(prompt_chunks) > 0 and len(prompt_chunks[0]) > 0 and prompt_chunks[0][0] == tokenizer.bos_token_id:
+        offset = 1
+        input_ids.append(prompt_chunks[0][0])
+
+    for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
+        input_ids.extend(x[offset:])
+
+    input_ids = repeat_element(input_ids, image_token_index, image_embd_size)
+
+    if return_tensors is not None:
+        if return_tensors == 'pt':
+            return torch.tensor(input_ids, dtype=torch.long)
+        raise ValueError(f'Unsupported tensor type: {return_tensors}')
+    return input_ids
+
+def expand2square(pil_img, background_color):
+    width, height = pil_img.size
+    if width == height:
+        return pil_img
+    elif width > height:
+        result = Image.new(pil_img.mode, (width, width), background_color)
+        result.paste(pil_img, (0, (width - height) // 2))
+        return result
+    else:
+        result = Image.new(pil_img.mode, (height, height), background_color)
+        result.paste(pil_img, ((height - width) // 2, 0))
+        return result
+
+def process_images(images, image_processor):
+    image_aspect_ratio = 'pad'
+    new_images = []
+    if image_aspect_ratio == 'pad':
+        for image in images:
+            image = expand2square(image, tuple(int(x*255) for x in image_processor.image_mean))
+            image = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+            new_images.append(image)
+    else:
+        return image_processor(images, return_tensors='pt')['pixel_values']
+    if all(x.shape == new_images[0].shape for x in new_images):
+        new_images = torch.stack(new_images, dim=0)
+    return new_images
 
 class LlamaMLP(nn.Module):
 
@@ -248,6 +388,16 @@ class LlamaModel(nn.Module):
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        vision_tower_cfg = {
+            "mm_hidden_size": 1024,
+            "mm_projector_type": "mlp2x_gelu",
+            "mm_vision_select_feature": "patch",
+            "mm_vision_select_layer": -2,
+            "mm_vision_tower": "openai/clip-vit-large-patch14-336",
+        }
+
+        self.vision_tower = CLIPVisionTower('openai/clip-vit-large-patch14-336', args=vision_tower_cfg, delay_load=False)
+
         self.mm_projector = nn.Sequential(
             nn.Linear(config.mm_hidden_size, config.hidden_size),
             nn.GELU(),
@@ -261,7 +411,7 @@ class LlamaModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        image_embd: Optional[torch.Tensor] = None # N, 3, 366, 366, for tagging purpose one image per datapoint is enough
+        image_pils: Optional[List[Image.Image]] = None # tagging purpose one image per datapoint is enough
     ) -> torch.Tensor:
         # print('llava_llama::forward', input_ids.shape)
         # if inputs_embeds :
@@ -269,9 +419,16 @@ class LlamaModel(nn.Module):
         # step 1: replace -200 with img enbd
         #breakpoint()
         #start_ts = time.perf_counter()
-        if image_embd and image_embd[0] is not None :
-            image_embd = torch.stack(image_embd).to(input_ids.device).half()
-            image_embd = self.vision_tower(image_embd)
+        # if input_ids.size(1) == 1 :
+        #     for x in image_embd :
+        #         assert x is None
+        # elif input_ids.size(1) > 1 and image_embd is not None :
+        #     for x in image_embd :
+        #         assert x is not None
+        if image_pils and image_pils[0] is not None :
+            images = process_images(image_pils, self.vision_tower.image_processor)
+            images = images.to(input_ids.device).half()
+            image_embd = self.vision_tower(images)
             image_embd = self.mm_projector(image_embd)
             image_seq_length = image_embd.size(1) # 576
             image_token_indices = (input_ids == IMAGE_TOKEN_INDEX).byte().argmax(dim=1).cpu().numpy()
@@ -328,14 +485,14 @@ class LLavaLlamaForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        image_embd: Optional[torch.Tensor] = None # N, 3, 366, 366, for tagging purpose one image per datapoint is enough
+        image_pils: Optional[List[Image.Image]] = None
     ) -> SamplerOutput:
         if hasattr(self, 'vision_tower') and not hasattr(self.model, 'vision_tower') :
             self.model.vision_tower = self.vision_tower
             self.model.vision_tower.to(input_ids.device).half()
             #self.model.vision_tower = torch.compile(self.model.vision_tower)
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata, cache_events, image_embd)
+                                   input_metadata, cache_events, image_pils = image_pils)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata)
         return next_tokens

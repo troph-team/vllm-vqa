@@ -15,6 +15,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
 
+from PIL import Image
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -103,7 +104,7 @@ class Worker:
             )
             seqs.append(seq)
 
-        input_tokens, image_embd, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, _, input_positions, input_metadata = self._prepare_inputs(
             seqs)
 
         # Execute the model.
@@ -165,7 +166,7 @@ class Worker:
 
         # Add prompt tokens.
         prompt_lens: List[int] = []
-        image_datas: List[torch.Tensor] = []
+        image_pils: List[Image.Image] = []
         for seq_group_metadata in seq_group_metadata_list:
             if not seq_group_metadata.is_prompt:
                 continue
@@ -186,7 +187,7 @@ class Worker:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.append(list(range(prompt_len)))
-            image_datas.append(seq_data.get_image_embd())
+            image_pils.append(seq_data.get_image_pil())
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -293,7 +294,7 @@ class Worker:
             block_tables=block_tables_tensor,
             sliding_window=self.sliding_window,
         )
-        return tokens_tensor, image_datas, positions_tensor, input_metadata
+        return tokens_tensor, image_pils, positions_tensor, input_metadata
 
     @torch.inference_mode()
     def execute_model(
@@ -328,13 +329,13 @@ class Worker:
             return {}
 
         # Prepare input tensors.
-        input_tokens, image_datas, input_positions, input_metadata = self._prepare_inputs(
+        input_tokens, image_pils, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
 
         # Execute the model.
         output = self.model(
             input_ids=input_tokens,
-            image_embd = image_datas,
+            image_pils = image_pils,
             positions=input_positions,
             kv_caches=self.gpu_cache,
             input_metadata=input_metadata,
