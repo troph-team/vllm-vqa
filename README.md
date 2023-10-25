@@ -1,13 +1,17 @@
 # vllm for VQA
 ## Installation
 ```
-1. Clone this repo
-2. use machine with CUDA 11.7, python 3.10 and pytorch 2.0.1
+1. use machine with CUDA 11.7, python 3.10 and pytorch 2.0.1
+2. Clone this repo
 3. pip install -e .
 ```
 ## Running
-- Run `batch_labelling.py --input <IMAGE_FOLDER> --model <PATH_TO_LLAVA1.5>` \
+### LLAVA 1.5
+- Run `batch_labelling.py --input <IMAGE_FOLDER> --model <PATH_TO_LLAVA1.5>`
 - Captions will be stored in `<image_name>.llava.jsonl`
+### QWen VL
+- Run `batch_labelling.py --input <IMAGE_FOLDER> --model <PATH_TO_QWENVL> --bs 8`
+- Captions will be stored in `<image_name>.qwenvl.jsonl`
 ---
 
 <p align="center">
