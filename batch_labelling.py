@@ -15,21 +15,27 @@ def batched(l: list, size: int) :
         yield l[i: i + size]
 
 def main(src: str, user_prompt: str, model: str, n_label_per_image: int = 5, batch_size: int = 16) :
+    model_type = ''
+    model_config_json = None
     sampling_params = SamplingParams(n = n_label_per_image, temperature = 1.0, top_k = 5, top_p = 1, max_tokens = 512)
+    if 'llava' in model.lower() :
+        model_type = 'llava'
+        with open(os.path.join(model, 'config.json'), 'r', encoding = 'utf-8') as fp :
+            model_config_json = json.load(fp)
+        model_config_json['model_type'] = 'llama'
+        with open(os.path.join(model, 'config.json'), 'w', encoding = 'utf-8') as fp :
+            json.dump(model_config_json, fp, indent = 2)
+    elif 'qwen' in model.lower() :
+        model_type = 'qwenvl'
+        sampling_params.stop_token_ids.append(151645) # add <|im_end|> token
+    else :
+        assert False, 'Unknown model type'
     gpu_memory_utilization = 0.95 # 95% of GPU
     llm = MLLM(model = model, gpu_memory_utilization = gpu_memory_utilization, trust_remote_code = True)
     all_image_files = []
     for ext in ['.jpg', '.png', '.jpeg', '.webp', '.bmp'] :
         all_image_files.extend(glob.glob(os.path.join(src, '**/*' + ext)))
         all_image_files.extend(glob.glob(os.path.join(src, '*' + ext)))
-    model_type = ''
-    if 'llava' in model.lower() :
-        model_type = 'llava'
-    elif 'qwen' in model.lower() :
-        model_type = 'qwenvl'
-        sampling_params.stop_token_ids.append(151645) # add <|im_end|> token
-    else :
-        assert False, 'Unknown model type'
     for batch in batched(all_image_files, batch_size) :
         images = [Image.open(filename).convert('RGB') for filename in batch]
         caption_files = []
