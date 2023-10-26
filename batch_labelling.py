@@ -25,12 +25,13 @@ def main(src: str, user_prompt: str, model: str, n_label_per_image: int = 5, bat
         model_config_json['model_type'] = 'llama'
         with open(os.path.join(model, 'config.json'), 'w', encoding = 'utf-8') as fp :
             json.dump(model_config_json, fp, indent = 2)
+        gpu_memory_utilization = 0.9 # 90% of GPU
     elif 'qwen' in model.lower() :
         model_type = 'qwenvl'
         sampling_params.stop_token_ids.append(151645) # add <|im_end|> token
+        gpu_memory_utilization = 0.95 # 95% of GPU
     else :
         assert False, 'Unknown model type'
-    gpu_memory_utilization = 0.95 # 95% of GPU
     llm = MLLM(model = model, gpu_memory_utilization = gpu_memory_utilization, trust_remote_code = True)
     all_image_files = []
     for ext in ['.jpg', '.png', '.jpeg', '.webp', '.bmp'] :
