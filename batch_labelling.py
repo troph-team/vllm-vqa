@@ -29,7 +29,7 @@ def main(src: str, user_prompt: str, model: str, n_label_per_image: int = 5, bat
     elif 'qwen' in model.lower() :
         model_type = 'qwenvl'
         sampling_params.stop_token_ids.append(151645) # add <|im_end|> token
-        gpu_memory_utilization = 0.95 # 95% of GPU
+        gpu_memory_utilization = 0.98 # 98% of GPU
     else :
         assert False, 'Unknown model type'
     llm = MLLM(model = model, gpu_memory_utilization = gpu_memory_utilization, trust_remote_code = True)
@@ -68,6 +68,6 @@ if __name__ == '__main__' :
     parser.add_argument('--model', type=str, default = "/home/ubuntu/data/models/llava-v1.5-7b")
     parser.add_argument('--prompt', type=str, default = "describe this image and its style in a very detailed manner.")
     parser.add_argument('--n', type=int, default = 1, help = 'How many captions to generate for an image')
-    parser.add_argument('--bs', type=int, default = 256, help = 'Inference batch size')
+    parser.add_argument('--bs', type=int, default = 256, help = 'Inference batch size, use 4 for QWen')
     args = parser.parse_args()
     main(args.input, args.prompt, args.model, args.n, args.bs)

@@ -428,7 +428,7 @@ class VisionTransformer(nn.Module):
             image = image.convert("RGB")
             images.append(self.image_transform(image))
         results = []
-        bs = 8
+        bs = 4
         for i in range(0, len(images), bs) :
             batch = torch.stack(images[i: i + bs], dim=0)
             results.append(self(batch))
