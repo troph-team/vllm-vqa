@@ -13,3 +13,5 @@ uvicorn[standard]
 pydantic == 1.10.13  # Required for OpenAI server.
 einops
 accelerate
+tiktoken
+transformers_stream_generator
