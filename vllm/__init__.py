@@ -9,7 +9,7 @@ from vllm.entrypoints.mllm import MLLM
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 
-__version__ = "0.2.1"
+__version__ = "0.2.1-mod"
 
 __all__ = [
     "LLM",
