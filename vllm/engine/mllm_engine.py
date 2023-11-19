@@ -18,7 +18,7 @@ from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
 from vllm.utils import Counter
 from vllm.model_executor.models.llava_llama import tokenizer_image_token as tokenizer_image_token_llava
-from vllm.model_executor.models.qwen import make_context as make_context_qwen_vl
+from vllm.model_executor.models.qwen import make_context as make_context_qwen_vl, make_context_qwen_vl_llama as make_context_qwen_vl_llama
 
 from PIL import Image
 import torch
@@ -274,6 +274,13 @@ class MLLMEngine:
             assert prompt is not None
             if 'Llava' in self.model_config.hf_config.architectures[0] :
                 prompt_token_ids = tokenizer_image_token_llava(prompt, self.tokenizer)
+            elif 'QwenLlama' in self.model_config.hf_config.architectures[0] :
+                raw_text, context_tokens = make_context_qwen_vl_llama(
+                    self.tokenizer,
+                    prompt,
+                    system = "You are a helpful assistant."
+                )
+                prompt_token_ids = context_tokens
             elif 'QWen' in self.model_config.hf_config.architectures[0] :
                 raw_text, context_tokens = make_context_qwen_vl(
                     self.tokenizer,

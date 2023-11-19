@@ -27,7 +27,7 @@ InputMetadata to extract the original 2D shape of the input.
 """
 from typing import Any, Dict, List, Optional, Tuple
 
-import time
+import os
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -47,150 +47,15 @@ from vllm.model_executor.weight_utils import (
     load_tensor_parallel_weights, load_padded_tensor_parallel_vocab)
 from vllm.sequence import SamplerOutput
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from PIL import Image
 
-IMAGE_TOKEN_INDEX = -200
+KVCache = Tuple[torch.Tensor, torch.Tensor]
 
-class CLIPVisionTower(nn.Module):
-    def __init__(self, vision_tower, args, delay_load=False):
-        super().__init__()
+from .qwen_visual import VisionTransformer
+from PIL import Image
 
-        self.is_loaded = False
-
-        self.vision_tower_name = vision_tower
-        self.select_layer = getattr(args, 'mm_vision_select_layer', -2)
-        self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
-
-        if not delay_load:
-            self.load_model()
-        else:
-            self.cfg_only = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
-
-    def load_model(self):
-        self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
-        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name)
-        self.vision_tower.requires_grad_(False)
-
-        self.is_loaded = True
-
-    def feature_select(self, image_forward_outs):
-        image_features = image_forward_outs.hidden_states[self.select_layer]
-        if self.select_feature == 'patch':
-            image_features = image_features[:, 1:]
-        elif self.select_feature == 'cls_patch':
-            image_features = image_features
-        else:
-            raise ValueError(f'Unexpected select feature: {self.select_feature}')
-        return image_features
-
-    @torch.no_grad()
-    def forward(self, images):
-        if type(images) is list:
-            image_features = []
-            for image in images:
-                image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
-                image_feature = self.feature_select(image_forward_out).to(image.dtype)
-                image_features.append(image_feature)
-        else:
-            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
-            image_features = self.feature_select(image_forward_outs).to(images.dtype)
-
-        return image_features
-
-    @property
-    def dummy_feature(self):
-        return torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)
-
-    @property
-    def dtype(self):
-        return self.vision_tower.dtype
-
-    @property
-    def device(self):
-        return self.vision_tower.device
-
-    @property
-    def config(self):
-        if self.is_loaded:
-            return self.vision_tower.config
-        else:
-            return self.cfg_only
-
-    @property
-    def hidden_size(self):
-        return self.config.hidden_size
-
-    @property
-    def num_patches(self):
-        return (self.config.image_size // self.config.patch_size) ** 2
-
-def repeat_element(lst, element, times):
-    # Create a new list to store the modified elements
-    new_lst = []
-    
-    for item in lst:
-        # Add the current item to the new list
-        new_lst.append(item)
-        
-        # Check if the current item is equal to the element to be repeated
-        if item == element:
-            # Repeat the element 'times' number of times
-            new_lst.extend([element] * (times - 1))
-    
-    return new_lst
-
-def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, image_embd_size=576, return_tensors=None):
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<image>')]
-    
-    def insert_separator(X, sep):
-        return [ele for sublist in zip(X, [sep]*len(X)) for ele in sublist][:-1]
-
-    input_ids = []
-    offset = 0
-    if len(prompt_chunks) > 0 and len(prompt_chunks[0]) > 0 and prompt_chunks[0][0] == tokenizer.bos_token_id:
-        offset = 1
-        input_ids.append(prompt_chunks[0][0])
-
-    for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
-        input_ids.extend(x[offset:])
-
-    input_ids = repeat_element(input_ids, image_token_index, image_embd_size)
-
-    if return_tensors is not None:
-        if return_tensors == 'pt':
-            return torch.tensor(input_ids, dtype=torch.long)
-        raise ValueError(f'Unsupported tensor type: {return_tensors}')
-    return input_ids
-
-def expand2square(pil_img, background_color):
-    width, height = pil_img.size
-    if width == height:
-        return pil_img
-    elif width > height:
-        result = Image.new(pil_img.mode, (width, width), background_color)
-        result.paste(pil_img, (0, (width - height) // 2))
-        return result
-    else:
-        result = Image.new(pil_img.mode, (height, height), background_color)
-        result.paste(pil_img, ((height - width) // 2, 0))
-        return result
-
-def process_images(images, image_processor):
-    image_aspect_ratio = 'pad'
-    new_images = []
-    if image_aspect_ratio == 'pad':
-        for image in images:
-            image = expand2square(image, tuple(int(x*255) for x in image_processor.image_mean))
-            image = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            new_images.append(image)
-    else:
-        return image_processor(images, return_tensors='pt')['pixel_values']
-    if all(x.shape == new_images[0].shape for x in new_images):
-        new_images = torch.stack(new_images, dim=0)
-    return new_images
+from transformers import PreTrainedTokenizer
+from torchvision import transforms
 
 class LlamaMLP(nn.Module):
 
@@ -388,21 +253,23 @@ class LlamaModel(nn.Module):
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        vision_tower_cfg = {
-            "mm_hidden_size": 1024,
-            "mm_projector_type": "mlp2x_gelu",
-            "mm_vision_select_feature": "patch",
-            "mm_vision_select_layer": -2,
-            "mm_vision_tower": "openai/clip-vit-large-patch14-336",
-        }
-
-        self.vision_tower = CLIPVisionTower('openai/clip-vit-large-patch14-336', args=vision_tower_cfg, delay_load=False)
-
-        self.mm_projector = nn.Sequential(
-            nn.Linear(config.mm_hidden_size, config.hidden_size),
-            nn.GELU(),
-            nn.Linear(config.hidden_size, config.hidden_size),
-        )
+        if hasattr(config, 'visual') :
+            print('using QWenLLamaLMHeadModel with vision')
+            self.visual = VisionTransformer(**config.visual)
+            mean = (0.48145466, 0.4578275, 0.40821073)
+            std = (0.26862954, 0.26130258, 0.27577711)
+            image_size = 448
+            self.image_transform = transforms.Compose([
+                transforms.Resize(
+                    (image_size, image_size),
+                    interpolation=transforms.InterpolationMode.BICUBIC
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ])
+        else :
+            print('using QWenLLamaLMHeadModel')
+            self.visual = None
 
     def forward(
         self,
@@ -411,33 +278,17 @@ class LlamaModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-        image_pils: Optional[List[Image.Image]] = None # tagging purpose one image per datapoint is enough
+        image_pils: Optional[List[Image.Image]] = None
     ) -> torch.Tensor:
-        # print('llava_llama::forward', input_ids.shape)
-        # if inputs_embeds :
-        #     print('llava_llama::forward inputs_embeds', inputs_embeds.shape)
-        # step 1: replace -200 with img enbd
-        #breakpoint()
-        #start_ts = time.perf_counter()
-        # if input_ids.size(1) == 1 :
-        #     for x in image_embd :
-        #         assert x is None
-        # elif input_ids.size(1) > 1 and image_embd is not None :
-        #     for x in image_embd :
-        #         assert x is not None
+        hidden_states = self.embed_tokens(input_ids)
         if image_pils and image_pils[0] is not None :
-            images = process_images(image_pils, self.vision_tower.image_processor)
-            images = images.to(input_ids.device).half()
-            image_embd = self.vision_tower(images)
-            image_embd = self.mm_projector(image_embd)
-            image_seq_length = image_embd.size(1) # 576
-            image_token_indices = (input_ids == IMAGE_TOKEN_INDEX).byte().argmax(dim=1).cpu().numpy()
-            input_ids[input_ids == IMAGE_TOKEN_INDEX] = 1
-            hidden_states = self.embed_tokens(input_ids)
-            for i, first in enumerate(image_token_indices) :
-                hidden_states[i, first: first + image_seq_length] = image_embd[i]
-        else :
-            hidden_states = self.embed_tokens(input_ids)
+            image_embds = self.visual.encode(image_pils)
+            bos_pos = torch.where(input_ids == self.config.visual['image_start_id'])
+            eos_pos = torch.where(input_ids == self.config.visual['image_start_id'] + 1)
+            assert (bos_pos[0] == eos_pos[0]).all()
+            img_pos = torch.stack((bos_pos[0], bos_pos[1], eos_pos[1]), dim=1)
+            for idx, (i, a, b) in enumerate(img_pos):
+                hidden_states[i, a + 1 : b] = image_embds[idx]
         for i in range(len(self.layers)):
             if cache_events is None:
                 cache_event = None
@@ -452,13 +303,10 @@ class LlamaModel(nn.Module):
                 cache_event,
             )
         hidden_states = self.norm(hidden_states)
-        #end_ts = time.perf_counter()
-        #elapsed = end_ts - start_ts
-        #print(1.0 / elapsed * input_ids.size(0), 'tokens/s')
         return hidden_states
 
 
-class LLavaLlamaForCausalLM(nn.Module):
+class QwenLlamaForCausalLM(nn.Module):
 
     def __init__(
         self,
@@ -502,17 +350,21 @@ class LLavaLlamaForCausalLM(nn.Module):
                      load_format: str = "auto",
                      revision: Optional[str] = None):
         if self.quant_config is None:
-            weight_suffixes = ["weight"]
+            col_weight_suffixes = ["weight"]
+            row_weight_suffixes = ["weight"]
         else:
-            weight_suffixes = self.quant_config.get_tp_tensor_names()
+            col_weight_suffixes = (
+                self.quant_config.get_col_parallel_tensor_names())
+            row_weight_suffixes = (
+                self.quant_config.get_row_parallel_tensor_names())
 
         column_parallel_weights: List[str] = []
         for layer in self._column_parallel_layers:
-            for suffix in weight_suffixes:
+            for suffix in col_weight_suffixes:
                 column_parallel_weights.append(f"{layer}.{suffix}")
         row_parallel_weights: List[str] = []
         for layer in self._row_parallel_layers:
-            for suffix in weight_suffixes:
+            for suffix in row_weight_suffixes:
                 row_parallel_weights.append(f"{layer}.{suffix}")
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -533,16 +385,17 @@ class LLavaLlamaForCausalLM(nn.Module):
              q_proj_shard_size + kv_proj_shard_size),
         ]
         state_dict = self.state_dict()
+        v_state_keys = {x: False for x in self.model.visual.state_dict()}
 
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            is_packed = False
+            packed_dim = None
             is_transposed = False
             if self.quant_config is not None:
-                is_packed = self.quant_config.is_packed(name)
+                packed_dim = self.quant_config.get_packed_dim(name)
                 is_transposed = self.quant_config.is_transposed(name)
             if is_transposed:
                 loaded_weight = convert_pyslice_to_tensor(loaded_weight)
@@ -550,15 +403,17 @@ class LLavaLlamaForCausalLM(nn.Module):
 
             is_attention_weight = False
             for weight_name, shard_size, offset in attention_weight_specs:
-                if weight_name not in name:
+                if weight_name not in name or 'model.visual' in name:
                     continue
                 param = state_dict[name.replace(weight_name, "qkv_proj")]
                 if is_transposed:
                     param = param.T
 
-                if is_packed:
-                    shard_size //= self.quant_config.pack_factor
-                    offset //= self.quant_config.pack_factor
+                if packed_dim is not None:
+                    shard_dim = 0 if not is_transposed else 1
+                    if packed_dim == shard_dim:
+                        shard_size //= self.quant_config.pack_factor
+                        offset //= self.quant_config.pack_factor
 
                 if weight_name in ["k_proj", "v_proj"]:
                     shard_id = tp_rank // num_kv_heads_replicas
@@ -578,7 +433,7 @@ class LLavaLlamaForCausalLM(nn.Module):
 
             is_gate_up_weight = False
             for stride_id, weight_name in enumerate(["gate_proj", "up_proj"]):
-                if weight_name not in name:
+                if weight_name not in name or 'model.visual' in name:
                     continue
                 param = state_dict[name.replace(weight_name, "gate_up_proj")]
                 if is_transposed:
@@ -596,9 +451,6 @@ class LLavaLlamaForCausalLM(nn.Module):
             if is_gate_up_weight:
                 continue
 
-            if name not in state_dict :
-                print(name)
-                continue
             param = state_dict[name]
             if is_transposed:
                 param = param.T
@@ -611,3 +463,6 @@ class LLavaLlamaForCausalLM(nn.Module):
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          column_parallel_weights,
                                          row_parallel_weights, tp_rank)
+            
+        vision_sd = torch.load(os.path.join(model_name_or_path, 'vision.bin.xx'), map_location = 'cpu')
+        self.model.visual.load_state_dict(vision_sd)

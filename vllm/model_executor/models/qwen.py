@@ -8,6 +8,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -42,6 +43,23 @@ from .qwen_visual import VisionTransformer
 from PIL import Image
 
 from transformers import PreTrainedTokenizer
+from torchvision import transforms
+
+def make_context_qwen_vl_llama(
+    tokenizer: PreTrainedTokenizer,
+    query: str,
+    system: str = "",
+):
+    if '<imgpad>' in query :
+        prompt = f"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
+        [l, r] = prompt.split('<imgpad>')
+        l_tokens = tokenizer.encode(l)
+        r_tokens = tokenizer.encode(r)
+        tokens = l_tokens + [151857] + [151859] * 256 + [151858] + r_tokens
+        return prompt, tokens
+    else :
+        prompt = f"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
+        return prompt, tokenizer.encode(prompt)
 
 def make_context(
     tokenizer: PreTrainedTokenizer,
@@ -277,6 +295,17 @@ class QWenModel(nn.Module):
         if hasattr(config, 'visual') :
             print('using QWenLMHeadModel with vision')
             self.visual = VisionTransformer(**config.visual)
+            mean = (0.48145466, 0.4578275, 0.40821073)
+            std = (0.26862954, 0.26130258, 0.27577711)
+            image_size = 448
+            self.image_transform = transforms.Compose([
+                transforms.Resize(
+                    (image_size, image_size),
+                    interpolation=transforms.InterpolationMode.BICUBIC
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ])
         else :
             print('using QWenLMHeadModel')
             self.visual = None

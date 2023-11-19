@@ -298,6 +298,7 @@ class LlamaForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
+        image_pils=None
     ) -> SamplerOutput:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata, cache_events)

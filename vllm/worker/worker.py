@@ -158,7 +158,6 @@ class Worker:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
-        #breakpoint()
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
