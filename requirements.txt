@@ -15,3 +15,6 @@ einops
 accelerate
 tiktoken
 transformers_stream_generator
+pillow 
+torchvision 
+matplotlib
